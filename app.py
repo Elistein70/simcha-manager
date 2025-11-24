@@ -2,27 +2,38 @@ import streamlit as st
 import os
 import base64
 import json
-from datetime import datetime, timedelta
 import urllib.parse
+from datetime import datetime, timedelta
 from PIL import Image
 from openai import OpenAI
+from streamlit_calendar import calendar
 
 # 1. CONFIGURATION & SETUP
-# ---------------------------------------------------------
 api_key = os.getenv("OPENAI_API_KEY") 
 if not api_key and "OPENAI_API_KEY" in st.secrets:
     api_key = st.secrets["OPENAI_API_KEY"]
 
 client = OpenAI(api_key=api_key)
+DB_FILE = "simchos.json"
 
-st.set_page_config(page_title="Simcha Manager", page_icon="✡️")
+st.set_page_config(page_title="Simcha Manager", page_icon="✡️", layout="wide")
 
-# Initialize session state for data if it doesn't exist
 if 'simcha_data' not in st.session_state:
     st.session_state['simcha_data'] = {}
 
-# 2. HELPER FUNCTIONS
-# ---------------------------------------------------------
+# 2. DATA STORAGE
+def load_db():
+    if not os.path.exists(DB_FILE): return []
+    try:
+        with open(DB_FILE, "r") as f: return json.load(f)
+    except: return []
+
+def save_to_db(new_event):
+    events = load_db()
+    events.append(new_event)
+    with open(DB_FILE, "w") as f: json.dump(events, f, indent=4)
+
+# 3. HELPER FUNCTIONS
 def encode_image(image_file):
     return base64.b64encode(image_file.getvalue()).decode('utf-8')
 
@@ -55,39 +66,36 @@ def analyze_simcha(image_base64, current_date_str):
     )
     return json.loads(response.choices[0].message.content)
 
-# 3. STREAMLIT UI
-# ---------------------------------------------------------
+# 4. STREAMLIT UI
 st.title("✡️ Simcha Manager")
 
 if not api_key:
-    st.warning("⚠️ API Key missing. Please add OPENAI_API_KEY to Streamlit Secrets.")
+    st.warning("⚠️ API Key missing in Secrets.")
     st.stop()
 
-# --- TABS SELECTION ---
-tab1, tab2 = st.tabs(["📷 Scan Invite", "✍️ Manual Entry"])
+# --- TABS ---
+tab1, tab2, tab3 = st.tabs(["📷 Scan Invite", "✍️ Manual Entry", "🗓️ Calendar View"])
 
+# === TAB 1: SCAN ===
 with tab1:
-    st.write("Upload an image to auto-extract details.")
     uploaded_file = st.file_uploader("Upload Invitation", type=['jpg', 'png', 'jpeg'])
     if uploaded_file:
         image = Image.open(uploaded_file)
         st.image(image, width=300)
         if st.button("Analyze Invitation"):
-            with st.spinner("Reading Hebrew dates..."):
+            with st.spinner("Reading details..."):
                 try:
                     b64 = encode_image(uploaded_file)
                     today = datetime.now().strftime("%Y-%m-%d")
                     data = analyze_simcha(b64, today)
                     st.session_state['simcha_data'] = data
                     st.session_state['has_data'] = True
-                    st.rerun() # Refresh to show the form below
-                except Exception as e:
-                    st.error(f"Error: {e}")
+                    st.rerun()
+                except Exception as e: st.error(f"Error: {e}")
 
+# === TAB 2: MANUAL ===
 with tab2:
-    st.write("Enter details yourself.")
     if st.button("Start Blank Entry"):
-        # Clear the data to allow fresh typing
         st.session_state['simcha_data'] = {
             "event_type": "", "celebrant": "", "location": "", 
             "date": datetime.now().strftime("%Y-%m-%d"), 
@@ -96,79 +104,45 @@ with tab2:
         st.session_state['has_data'] = True
         st.rerun()
 
-# --- SHARED EDITING & LINKS SECTION ---
+# === PROCESSING ===
 if st.session_state.get('has_data'):
     st.markdown("---")
-    st.subheader("📝 Review & Calendar Links")
-    
+    st.subheader("📝 Review & Save")
     data = st.session_state['simcha_data']
     
-    # EDITABLE FORM
     with st.form("simcha_form"):
         c1, c2 = st.columns(2)
         with c1:
             e_type = st.text_input("Event Type", value=data.get('event_type', ''))
-            
-            # Handle Date Parsing safely
-            try:
-                d_val = datetime.strptime(str(data.get('date')), "%Y-%m-%d")
-            except:
-                d_val = datetime.now()
+            try: d_val = datetime.strptime(str(data.get('date')), "%Y-%m-%d")
+            except: d_val = datetime.now()
             e_date = st.date_input("Date", value=d_val)
-            
             is_shabbos = st.checkbox("Is this Shabbos?", value=data.get('is_shabbos_event', False))
-            
         with c2:
             e_name = st.text_input("Celebrant", value=data.get('celebrant', ''))
-            
-            # Handle Time Parsing safely
-            try:
-                t_val = datetime.strptime(str(data.get('time')), "%H:%M").time()
-            except:
-                t_val = datetime.strptime("19:00", "%H:%M").time()
+            try: t_val = datetime.strptime(str(data.get('time')), "%H:%M").time()
+            except: t_val = datetime.strptime("19:00", "%H:%M").time()
             e_time = st.time_input("Time", value=t_val)
-            
             e_loc = st.text_input("Location", value=data.get('location', ''))
 
-        # LOGIC SECTION inside the form so it looks clean
         st.markdown("#### Actions")
         col_a, col_b = st.columns(2)
-        with col_a:
-            attending = st.radio("Are you attending?", ["Yes", "Maybe", "No"], horizontal=True)
-        with col_b:
-            need_gift = st.radio("Need a gift?", ["Yes", "No"], index=1, horizontal=True)
-            
-        submitted = st.form_submit_button("✅ Generate Links")
+        with col_a: attending = st.radio("Are you attending?", ["Yes", "Maybe", "No"], horizontal=True)
+        with col_b: need_gift = st.radio("Need a gift?", ["Yes", "No"], index=1, horizontal=True)
+        submitted = st.form_submit_button("✅ Save & Generate Links")
 
-    # GENERATE LINKS UPON SUBMISSION
-    if submitted and attending in ["Yes", "Maybe"]:
-        st.markdown("### 🔗 Click to Add")
-        
-        # 1. Main Event Link
-        start_dt = datetime.combine(e_date, e_time)
-        end_dt = start_dt + timedelta(hours=3)
-        event_link = generate_google_calendar_link(
-            f"{e_type}: {e_name}", start_dt, end_dt, e_loc, "Simcha Manager"
-        )
-        st.markdown(f"**1. Event:** [Add to Calendar]({event_link})")
+    if submitted:
+        # SAVE
+        new_record = {
+            "title": f"{e_type}: {e_name}",
+            "start": f"{e_date}T{e_time}",
+            "location": e_loc,
+            "attending": attending
+        }
+        save_to_db(new_record)
+        st.success("Saved to Simcha Calendar!")
 
-        # 2. Gift Link (if needed)
-        if need_gift == "Yes":
-            if is_shabbos:
-                # Friday 10AM before the event
-                days_back = (e_date.weekday() - 4) % 7 
-                # If event is Friday (4), result 0. If Sat (5), result 1.
-                # If event is next week, logic holds to find PREVIOUS Friday.
-                friday = e_date - timedelta(days=(e_date.weekday() - 4))
-                # If we went forward in time (unlikely with this math), adjust back.
-                if friday > e_date: friday -= timedelta(days=7)
-                
-                gift_start = datetime.combine(friday, datetime.strptime("10:00", "%H:%M").time())
-            else:
-                # Day before
-                gift_start = datetime.combine(e_date - timedelta(days=1), datetime.strptime("10:00", "%H:%M").time())
-            
-            gift_link = generate_google_calendar_link(
-                f"Buy Gift: {e_name}", gift_start, gift_start + timedelta(minutes=30), "Local Store", "Reminder"
-            )
-            st.markdown(f"**2. Gift:** [Add Gift Reminder]({gift_link})")
+        # LINKS
+        if attending in ["Yes", "Maybe"]:
+            start_dt = datetime.combine(e_date, e_time)
+            end_dt = start
