@@ -21,19 +21,36 @@ st.set_page_config(page_title="Simcha Manager", page_icon="✡️", layout="wide
 if 'simcha_data' not in st.session_state:
     st.session_state['simcha_data'] = {}
 
-# 2. DATA STORAGE
+# 2. ROBUST DATA STORAGE
+# ---------------------------------------------------------
 def load_db():
-    if not os.path.exists(DB_FILE): return []
+    """Safely loads the database, handling errors if file is missing/corrupt."""
+    if not os.path.exists(DB_FILE):
+        return []
     try:
-        with open(DB_FILE, "r") as f: return json.load(f)
-    except: return []
+        with open(DB_FILE, "r") as f:
+            content = f.read()
+            if not content: return [] # Handle empty file
+            return json.loads(content)
+    except (json.JSONDecodeError, FileNotFoundError):
+        return []
 
 def save_to_db(new_event):
+    """Safely appends to the database."""
     events = load_db()
+    # Add a unique ID based on timestamp to avoid duplicates/errors
+    new_event['id'] = datetime.now().strftime("%Y%m%d%H%M%S")
     events.append(new_event)
-    with open(DB_FILE, "w") as f: json.dump(events, f, indent=4)
+    try:
+        with open(DB_FILE, "w") as f:
+            json.dump(events, f, indent=4)
+        return True
+    except Exception as e:
+        st.error(f"Could not save to disk: {e}")
+        return False
 
 # 3. HELPER FUNCTIONS
+# ---------------------------------------------------------
 def encode_image(image_file):
     return base64.b64encode(image_file.getvalue()).decode('utf-8')
 
@@ -67,14 +84,15 @@ def analyze_simcha(image_base64, current_date_str):
     return json.loads(response.choices[0].message.content)
 
 # 4. STREAMLIT UI
+# ---------------------------------------------------------
 st.title("✡️ Simcha Manager")
 
 if not api_key:
-    st.warning("⚠️ API Key missing in Secrets.")
+    st.warning("⚠️ API Key missing. Please check Streamlit Secrets.")
     st.stop()
 
 # --- TABS ---
-tab1, tab2, tab3 = st.tabs(["📷 Scan Invite", "✍️ Manual Entry", "🗓️ Calendar View"])
+tab1, tab2, tab3 = st.tabs(["📷 Scan Invite", "✍️ Manual Entry", "🗓️ Simcha List"])
 
 # === TAB 1: SCAN ===
 with tab1:
@@ -104,7 +122,7 @@ with tab2:
         st.session_state['has_data'] = True
         st.rerun()
 
-# === PROCESSING ===
+# === PROCESSING (Shared) ===
 if st.session_state.get('has_data'):
     st.markdown("---")
     st.subheader("📝 Review & Save")
@@ -129,20 +147,68 @@ if st.session_state.get('has_data'):
         col_a, col_b = st.columns(2)
         with col_a: attending = st.radio("Are you attending?", ["Yes", "Maybe", "No"], horizontal=True)
         with col_b: need_gift = st.radio("Need a gift?", ["Yes", "No"], index=1, horizontal=True)
-        submitted = st.form_submit_button("✅ Save & Generate Links")
+        submitted = st.form_submit_button("✅ Save to List")
 
     if submitted:
-        # SAVE
         new_record = {
             "title": f"{e_type}: {e_name}",
             "start": f"{e_date}T{e_time}",
             "location": e_loc,
-            "attending": attending
+            "attending": attending,
+            "extendedProps": { "gift": need_gift, "shabbos": is_shabbos }
         }
-        save_to_db(new_record)
-        st.success("Saved to Simcha Calendar!")
-
-        # LINKS
-        if attending in ["Yes", "Maybe"]:
+        if save_to_db(new_record):
+            st.success("Saved!")
+            # Generate links but don't force them immediately
             start_dt = datetime.combine(e_date, e_time)
-            end_dt = start
+            end_dt = start_dt + timedelta(hours=3)
+            event_link = generate_google_calendar_link(f"{e_type}: {e_name}", start_dt, end_dt, e_loc, "Simcha Manager")
+            st.markdown(f"**Event Link:** [Add to Google Calendar]({event_link})")
+
+# === TAB 3: LIST VIEW (Outlook/HebCal Style) ===
+with tab3:
+    st.header("📅 Simcha Schedule")
+    events = load_db()
+    
+    if not events:
+        st.info("No Simchos saved yet.")
+    else:
+        # Prepare events for calendar
+        cal_events = []
+        for e in events:
+            # Color Logic: Green for Yes, Yellow for Maybe, Grey for No
+            color = "#28a745" if e['attending'] == "Yes" else ("#ffc107" if e['attending'] == "Maybe" else "#6c757d")
+            
+            cal_events.append({ 
+                "title": e['title'], 
+                "start": e['start'], 
+                "backgroundColor": color, 
+                "borderColor": color,
+                "allDay": False
+            })
+            
+        # CONFIGURATION FOR LIST VIEW
+        calendar_options = {
+            "initialView": "listMonth", # <--- THIS MAKES IT A LIST
+            "headerToolbar": {
+                "left": "today prev,next",
+                "center": "title",
+                "right": "listMonth,dayGridMonth" # Button to toggle views
+            },
+            "views": {
+                "listMonth": { "buttonText": "List View" },
+                "dayGridMonth": { "buttonText": "Grid View" }
+            }
+        }
+        
+        calendar(events=cal_events, options=calendar_options)
+
+    # ADD DOWNLOAD BUTTON (Backup)
+    if events:
+        st.markdown("---")
+        st.download_button(
+            label="📥 Download My Simchos (Backup)",
+            data=json.dumps(events, indent=4),
+            file_name="my_simchos.json",
+            mime="application/json"
+        )
